@@ -121,23 +121,7 @@ func writeMXdeviceH(contextMap map[string]map[string]string, srcFolder string, m
 		return err
 	}
 
-	main := path.Join(srcFolderAbs, "main.c")
-	main = filepath.Clean(main)
-	main = filepath.ToSlash(main)
-	fMain, err := os.Open(main)
-	if err != nil {
-		return err
-	}
-	defer fMain.Close()
-
-	msp := path.Join(srcFolderAbs, mspName)
-	msp = filepath.Clean(msp)
-	msp = filepath.ToSlash(msp)
-	fMsp, err := os.Open(msp)
-	if err != nil {
-		return err
-	}
-	defer fMsp.Close()
+	generatedAsPair := contextMap["ProjectManager"]["CoupleFile"]
 
 	fName := "MX_Device.h"
 	fPath := filepath.Clean(cfgPath)
@@ -171,31 +155,132 @@ func writeMXdeviceH(contextMap map[string]map[string]string, srcFolder string, m
 	sort.Strings(peripherals)
 	for _, peripheral := range peripherals {
 		vmode := getVirtualMode(contextMap, peripheral)
-		i2cInfo, err := getI2cInfo(fMain, peripheral)
-		if err != nil {
-			return err
-		}
-		usbHandle, err := getUSBHandle(fMain, peripheral)
-		if err != nil {
-			return err
-		}
-		mciMode, err := getMCIMode(fMain, peripheral)
-		if err != nil {
-			return err
-		}
+		var i2cInfo map[string]string
+		var usbHandle string
+		var mciMode string
+		var pins map[string]PinDefinition
 
 		freq := getI2CFreq(contextMap, peripheral)
 		if freq == "" {
 			freq = getMMCFreq(contextMap, peripheral)
 		}
-		if freq == "" {
-			freq = getSPIFreq(fMain, contextMap, peripheral)
+
+		if generatedAsPair == "false" {
+			main := path.Join(srcFolderAbs, "main.c")
+			main = filepath.Clean(main)
+			main = filepath.ToSlash(main)
+			var fMain *os.File
+			fMain, err = os.Open(main)
+			if err != nil {
+				return err
+			}
+			defer fMain.Close()
+
+			msp := path.Join(srcFolderAbs, mspName)
+			msp = filepath.Clean(msp)
+			msp = filepath.ToSlash(msp)
+			var fMsp *os.File
+			fMsp, err = os.Open(msp)
+			if err != nil {
+				return err
+			}
+			defer fMsp.Close()
+
+			i2cInfo, err = getI2cInfo(fMain, peripheral)
+			if err != nil {
+				return err
+			}
+			usbHandle, err = getUSBHandle(fMain, peripheral)
+			if err != nil {
+				return err
+			}
+			mciMode, err = getMCIMode(fMain, peripheral)
+			if err != nil {
+				return err
+			}
+
+			if freq == "" {
+				freq = getSPIFreq(fMain, contextMap, peripheral)
+			}
+			pins, err = getPins(contextMap, fMsp, peripheral)
+			if err != nil {
+				return err
+			}
+		} else {
+			/* search into file peripheral */
+			if strings.Contains(peripheral, "I2C") {
+				i2c := path.Join(srcFolderAbs, "i2c.c")
+				i2c = filepath.Clean(i2c)
+				i2c = filepath.ToSlash(i2c)
+				fI2C, errI2c := os.Open(i2c)
+				if errI2c != nil {
+					return errI2c
+				} else {
+					i2cInfo, err = getI2cInfo(fI2C, peripheral)
+					if err != nil {
+						return err
+					}
+					pins, err = getPins(contextMap, fI2C, peripheral)
+					if err != nil {
+						return err
+					}
+					defer fI2C.Close()
+				}
+			} else if strings.Contains(peripheral, "USB") {
+				usb := path.Join(srcFolderAbs, "usb.c")
+				usb = filepath.Clean(usb)
+				usb = filepath.ToSlash(usb)
+				fUsb, errUsb := os.Open(usb)
+				if errUsb != nil {
+					return errUsb
+				} else {
+					usbHandle, err = getUSBHandle(fUsb, peripheral)
+					if err != nil {
+						return err
+					}
+					pins, err = getPins(contextMap, fUsb, peripheral)
+					if err != nil {
+						return err
+					}
+					defer fUsb.Close()
+				}
+			} else if strings.Contains(peripheral, "SDMMC") {
+				mmc := path.Join(srcFolderAbs, "sdmmc.c")
+				mmc = filepath.Clean(mmc)
+				mmc = filepath.ToSlash(mmc)
+				fMMC, errMmc := os.Open(mmc)
+				if errMmc != nil {
+					return errMmc
+				} else {
+					mciMode, err = getMCIMode(fMMC, peripheral)
+					if err != nil {
+						return err
+					}
+					pins, err = getPins(contextMap, fMMC, peripheral)
+					if err != nil {
+						return err
+					}
+					defer fMMC.Close()
+				}
+			} else if strings.Contains(peripheral, "SPI") {
+				spi := path.Join(srcFolderAbs, "spi.c")
+				spi = filepath.Clean(spi)
+				spi = filepath.ToSlash(spi)
+				fSPI, errSpi := os.Open(spi)
+				if errSpi != nil {
+					return errSpi
+				}
+				defer fSPI.Close()
+				pins, err = getPins(contextMap, fSPI, peripheral)
+				if err != nil {
+					return err
+				}
+				if freq == "" {
+					freq = getSPIFreq(fSPI, contextMap, peripheral)
+				}
+			}
 		}
 
-		pins, err := getPins(contextMap, fMsp, peripheral)
-		if err != nil {
-			return err
-		}
 		err = mxDeviceWritePeripheralCfg(out, peripheral, vmode, freq, i2cInfo, usbHandle, mciMode, pins)
 		if err != nil {
 			return err
@@ -383,12 +468,12 @@ func getI2cInfo(fMain *os.File, peripheral string) (map[string]string, error) {
 		for mainScan.Scan() {
 			line := mainScan.Text()
 			if !section {
-				if strings.HasPrefix(line, "static void MX_"+peripheral+"_Init") && !strings.Contains(line, ";") {
-					section = true // Start of section: static void MX_I2Cx_Init
+				if strings.Contains(line, "void MX_"+peripheral+"_Init") && !strings.Contains(line, ";") {
+					section = true // Start of section: void MX_I2Cx_Init
 				}
-			} else { // Parse section: static void MX_I2Cx_Init
+			} else { // Parse section: void MX_I2Cx_Init
 				if strings.HasPrefix(line, "}") {
-					break // End of section: static void MX_I2Cx_Init
+					break // End of section: void MX_I2Cx_Init
 				}
 				if strings.Contains(line, "HAL_I2CEx_ConfigAnalogFilter") {
 					if strings.Contains(line, "I2C_ANALOGFILTER_ENABLE") {
@@ -614,12 +699,12 @@ func getSPIFreq(fMain *os.File, contextMap map[string]map[string]string, periphe
 		for mainScan.Scan() {
 			line := mainScan.Text()
 			if !section {
-				if strings.HasPrefix(line, "static void MX_"+peripheral+"_Init") && !strings.Contains(line, ";") {
-					section = true // Start of section: static void MX_SPIx_Init
+				if strings.Contains(line, "void MX_"+peripheral+"_Init") && !strings.Contains(line, ";") {
+					section = true // Start of section: void MX_SPIx_Init
 				}
-			} else { // Parse section: static void MX_SPIx_Init
+			} else { // Parse section: void MX_SPIx_Init
 				if strings.HasPrefix(line, "}") {
-					break // End of section: static void MX_SPICx_Init
+					break // End of section: void MX_SPICx_Init
 				}
 				if strings.Contains(line, "BaudRatePrescaler") {
 					ps := strings.Split(line, "=")[1]
